@@ -8,6 +8,9 @@ state.json
 
 # Environment variables
 .env
+
+# Virtual environment
+venv/
 .env.*
 
 # IDE settings
