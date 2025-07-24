@@ -1,0 +1,31 @@
+{
+  "apikey": "SAMPLE_API_KEY",
+  "domain": "example.com",
+  "telegram_bot_token": "SAMPLE_BOT_TOKEN",
+  "telegram_chat_id": "123456789",
+  "timeout_seconds": 10,
+  "timeout_val": 1,
+  "ssh_user": "root",
+  "ssh_pass": "password",
+  "xui_db_path": "/etc/x-ui/x-ui.db",
+  "panel_user": "paneluser",
+  "panel_pass": "panelpass",
+  "panel_port": "panelport",
+  "base_path": "panelbasepath",
+  "max_capacity": 400,
+  "capacity_threshold": 5,
+  "cert_check_interval_days": 3,
+  "cert_expiry_threshold_days": 4,
+  "records": {
+    "server1": {"id": "sample-id-1", "backup_ip": "1.2.3.4"},
+    "server2": {"id": "sample-id-2", "backup_ip": "1.2.3.5"},
+    "server3": {"id": "sample-id-3", "backup_ip": "1.2.3.6"},
+    "server4": {"id": "sample-id-4", "backup_ip": "1.2.3.7"},
+    "server5": {"id": "sample-id-5", "backup_ip": "1.2.3.8"},
+    "server6": {"id": "sample-id-6", "backup_ip": "1.2.3.9"},
+    "server7": {"id": "sample-id-7", "backup_ip": "1.2.3.10"},
+    "server8": {"id": "sample-id-8", "backup_ip": "1.2.3.11"},
+    "server9": {"id": "sample-id-9", "backup_ip": "1.2.3.12"},
+    "server10": {"id": "sample-id-10", "backup_ip": "1.2.3.13"} 
+  }
+} 

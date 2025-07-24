@@ -19,3 +19,5 @@ venv/
 
 # Log files
 *.log
+
+config.json

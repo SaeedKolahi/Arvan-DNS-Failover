@@ -14,38 +14,33 @@ import platform
 import subprocess
 import stat
 import shutil
+from client_counter import get_client_count
+import pytz
 
 
 
 
 # === CONFIG BLOCK ===
-CONFIG = {
-    "apikey": "your-arvan-api-key",
-    "domain": "example.com",
-    "telegram_bot_token": "your-telegram-bot-token",
-    "telegram_chat_id": "your-telegram-chat-id",
-    "timeout_seconds": 10,
-    "timeout_val" : 1,
-    "ssh_user": "root",
-    "ssh_pass": "your-ssh-password",
-    "xui_db_path": "/etc/x-ui/x-ui.db",
-    "cert_check_interval_days": 3,
-    "cert_expiry_threshold_days": 4,
-
-    "records": {
-        "subdomain": {
-            "id": "12345678-1234-5678-1234-567812345678",
-            "backup_ip": "192.168.1.100"
-        },
-    }
-
-}
+if os.path.exists("config.json"):
+    with open("config.json") as f:
+        CONFIG = json.load(f)
+else:
+    with open("config.sample.json") as f:
+        CONFIG = json.load(f)
 STATE_FILE = 'state.json'
 KEY_NAME = "xrayTemplateConfig"
 # =====================
 
-LOG_FILE = "/root/dns-arvan/dns_failover.log"
-PRINT_LOG_FILE = "/root/dns-arvan/dns_failover_prints.log"
+# OS-aware log paths
+if platform.system() == "Windows":
+    LOG_FILE = "dns_failover.log"
+    PRINT_LOG_FILE = "dns_failover_prints.log"
+else:
+    LOG_FILE = "/root/dns-arvan/dns_failover.log"
+    PRINT_LOG_FILE = "/root/dns-arvan/dns_failover_prints.log"
+    # Ensure the directory exists on non-Windows systems
+    os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
+
 
 LOG_MAX_SIZE = 5 * 1024 * 1024
 LOG_BACKUP_COUNT = 3
@@ -53,7 +48,7 @@ LOG_BACKUP_COUNT = 3
 # Main logger (file only, no console)
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
-main_handler = RotatingFileHandler(LOG_FILE, maxBytes=LOG_MAX_SIZE, backupCount=LOG_BACKUP_COUNT)
+main_handler = RotatingFileHandler(LOG_FILE, maxBytes=LOG_MAX_SIZE, backupCount=LOG_BACKUP_COUNT, encoding='utf-8')
 main_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
 logger.addHandler(main_handler)
 
@@ -62,7 +57,7 @@ print_logger = logging.getLogger("print_logger")
 print_logger.setLevel(logging.INFO)
 
 # File handler for prints
-print_file_handler = RotatingFileHandler(PRINT_LOG_FILE, maxBytes=LOG_MAX_SIZE, backupCount=LOG_BACKUP_COUNT)
+print_file_handler = RotatingFileHandler(PRINT_LOG_FILE, maxBytes=LOG_MAX_SIZE, backupCount=LOG_BACKUP_COUNT, encoding='utf-8')
 print_file_handler.setFormatter(logging.Formatter("%(asctime)s [PRINT] %(message)s"))
 print_logger.addHandler(print_file_handler)
 
@@ -349,7 +344,8 @@ def check_cert_expiry_main_server(host):
 def main():
     state = load_json(STATE_FILE)
     domain = CONFIG["domain"]
-
+    total_available = 0
+    capacity_details = []
 
     for subdomain, rec in CONFIG["records"].items():
         fqdn = f"{subdomain}.{domain}"
@@ -362,6 +358,25 @@ def main():
         })
 
         print(f"[*] Probing {fqdn} (ping each IP once with {CONFIG['timeout_seconds']}s timeout)...")
+        
+        # Count clients on the current main server
+        tehran = pytz.timezone('Asia/Tehran')
+        now_tehran = datetime.now(tehran)
+        if 10 <= now_tehran.hour < 22:
+            client_count = get_client_count(fqdn, CONFIG["panel_port"], CONFIG["base_path"], CONFIG["panel_user"], CONFIG["panel_pass"])
+            if client_count is not None:
+                available = max(0, CONFIG["max_capacity"] - client_count)
+                total_available += available
+                capacity_details.append(f"{subdomain}: {client_count} / {CONFIG['max_capacity']} (available: {available})")
+                print(f"    -> 📊 Client Count: {client_count} (available: {available})")
+            else:
+                capacity_details.append(f"{subdomain}: Failed to get count")
+                print(f"    -> ⚠️  Could not retrieve client count for {fqdn}.")
+        else:
+            print("⏰ Outside the allowed time (10:00 to 22:00 Iran time)")
+            client_count = None
+        
+
         try:
             main_ip = socket.gethostbyname(fqdn)
         except:
@@ -482,6 +497,21 @@ def main():
                     )
                     send_telegram_message(CONFIG["telegram_bot_token"], CONFIG["telegram_chat_id"], msg)
     
+    # === Capacity Check and Telegram Notification ===
+    if total_available < CONFIG["capacity_threshold"]:
+        print(f"\nTotal capacity available ({total_available}) is below the threshold ({CONFIG['capacity_threshold']}). Sending Telegram alert.")
+        details_md = "\n".join([escape_markdown(d) for d in capacity_details])
+        msg = (
+            f"⚠️ *Capacity Alert*\n"
+            f"Total available: {total_available}\n"
+            f"Threshold: {CONFIG['capacity_threshold']}\n"
+            f"*Details*:\n{details_md}"
+
+        )
+        send_telegram_message(CONFIG["telegram_bot_token"], CONFIG["telegram_chat_id"], msg)
+    else:
+        print(f"\nTotal capacity available ({total_available}) is within the threshold ({CONFIG['capacity_threshold']}). No alert sent.")
+
     # === Check certs on current main servers ===
     if should_check_cert(state):
         all_alerts = []
