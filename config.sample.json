@@ -16,6 +16,8 @@
     "capacity_threshold": 5,
     "cert_check_interval_days": 3,
     "cert_expiry_threshold_days": 4,
+    "capacity_alert_start_hour": 10,
+    "capacity_alert_end_hour": 22,
     "records": {
       "server1": {"id": "sample-id-1", "backup_ip": "1.2.3.4"},
       "server2": {"id": "sample-id-2", "backup_ip": "1.2.3.5"},

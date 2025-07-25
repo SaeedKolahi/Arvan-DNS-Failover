@@ -161,13 +161,19 @@ def escape_markdown(text: str) -> str:
     special_chars = r'\_*[]()~`>#+-=|{}.!'
     return ''.join('\\' + c if c in special_chars else c for c in text)
 
-def send_telegram_message(bot_token, chat_id, text):
+# Update send_telegram_message to support reply_to_message_id
+
+def send_telegram_message(bot_token, chat_id, text, reply_markup=None, reply_to_message_id=None):
     url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
     payload = {
         "chat_id": chat_id,
         "text": text,
         "parse_mode": "MarkdownV2"
     }
+    if reply_markup:
+        payload["reply_markup"] = reply_markup
+    if reply_to_message_id:
+        payload["reply_to_message_id"] = reply_to_message_id
     try:
         r = requests.post(url, json=payload, timeout=10)
         r.raise_for_status()
@@ -351,6 +357,10 @@ def check_cert_expiry_main_server(host):
 
 def main():
     state = load_json(STATE_FILE)
+    # Initialize mute keys for each alert type if missing
+    for mute_key in ["mute_capacity_alert", "mute_failover_alert", "mute_ssl_alert", "mute_backup_failover_alert"]:
+        if mute_key not in state:
+            state[mute_key] = False
     domain = CONFIG["domain"]
     total_available = 0
     capacity_details = []
@@ -401,7 +411,7 @@ def main():
                 
                     
                     
-                send_telegram_message(CONFIG["telegram_bot_token"], CONFIG["telegram_chat_id"],msg)
+                send_telegram_message(CONFIG["telegram_bot_token"], CONFIG["telegram_chat_id"],msg, reply_markup=json.dumps(build_dynamic_keyboard(state)))
                 continue   
 
             for ip in state[subdomain]["original_ips"]:
@@ -426,7 +436,10 @@ def main():
                                 f"IPs: {ips_md}\n"
                                 "Status: Restored to main IPs"
                             )
-                            send_telegram_message(CONFIG["telegram_bot_token"], CONFIG["telegram_chat_id"], msg)
+                            if not state.get("mute_failover_alert", False):
+                                send_telegram_message(CONFIG["telegram_bot_token"], CONFIG["telegram_chat_id"], msg, reply_markup=json.dumps(build_dynamic_keyboard(state)))
+                            else:
+                                print("🔕 Failover alerts are muted.")
                         else:
                             print("[API] Failed to restore main IPs.")
                         break
@@ -466,7 +479,10 @@ def main():
                     f"Backup IP unreachable: {backup_ip_md}\n"
                     "Keeping Main IPs"
                     )
-                    send_telegram_message(CONFIG["telegram_bot_token"], CONFIG["telegram_chat_id"], msg)
+                    if not state.get("mute_failover_alert", False):
+                        send_telegram_message(CONFIG["telegram_bot_token"], CONFIG["telegram_chat_id"], msg, reply_markup=json.dumps(build_dynamic_keyboard(state)))
+                    else:
+                        print("🔕 Failover alerts are muted.")
                     continue
                 
                 success = update_record(CONFIG["apikey"], domain, record_id, subdomain, [backup_ip] * 3)
@@ -483,7 +499,10 @@ def main():
                         f"Original IPs: {orig_ips_md}\n"
                         f"Switched to Backup IP: {backup_ip_md}"
                     )
-                    send_telegram_message(CONFIG["telegram_bot_token"], CONFIG["telegram_chat_id"], msg)
+                    if not state.get("mute_failover_alert", False):
+                        send_telegram_message(CONFIG["telegram_bot_token"], CONFIG["telegram_chat_id"], msg, reply_markup=json.dumps(build_dynamic_keyboard(state)))
+                    else:
+                        print("🔕 Failover alerts are muted.")
                     
                 else:
                     print("[API] Failed to switch to backup IPs.")
@@ -499,7 +518,10 @@ def main():
                         "❌ *Backup Sync Failed*\n"
                         f"Could not reach backup server {backup_ip_md}"
                     )
-                    send_telegram_message(CONFIG["telegram_bot_token"], CONFIG["telegram_chat_id"], msg)
+                    if not state.get("mute_backup_failover_alert", False):
+                        send_telegram_message(CONFIG["telegram_bot_token"], CONFIG["telegram_chat_id"], msg, reply_markup=json.dumps(build_dynamic_keyboard(state)))
+                    else:
+                        print("🔕 Backup Failover alerts are muted.")
     
     # === Capacity Check and Telegram Notification ===
     if total_available < CONFIG["capacity_threshold"]:
@@ -514,10 +536,13 @@ def main():
         )
         tehran = pytz.timezone('Asia/Tehran')
         now_tehran = datetime.now(tehran)
-        if 10 <= now_tehran.hour < 22:
-            send_telegram_message(CONFIG["telegram_bot_token"], CONFIG["telegram_chat_id"], msg)
+        if CONFIG["capacity_alert_start_hour"] <= now_tehran.hour < CONFIG["capacity_alert_end_hour"]:
+            if not state.get("mute_capacity_alert", False):
+                send_telegram_message(CONFIG["telegram_bot_token"], CONFIG["telegram_chat_id"], msg, reply_markup=json.dumps(build_dynamic_keyboard(state)))
+            else:
+                print("🔕 Capacity alerts are muted.")
         else:
-            print("⏰ Outside the allowed time (10:00 to 22:00 Iran time)")
+            print(f"⏰ Outside the allowed time ({CONFIG['capacity_alert_start_hour']}:00 to {CONFIG['capacity_alert_end_hour']}:00 Iran time)")
         
     else:
         print(f"\nTotal capacity available ({total_available}) is within the threshold ({CONFIG['capacity_threshold']}). No alert sent.")
@@ -545,7 +570,10 @@ def main():
                 msg_lines.append(f"• Cert Folder: `/root/cert`/{inline_code(folder)} — Days Left: {inline_code(str(days_left))}")
 
             msg = "\n".join(msg_lines)
-            send_telegram_message(CONFIG["telegram_bot_token"], CONFIG["telegram_chat_id"], msg)
+            if not state.get("mute_ssl_alert", False):
+                send_telegram_message(CONFIG["telegram_bot_token"], CONFIG["telegram_chat_id"], msg, reply_markup=json.dumps(build_dynamic_keyboard(state)))
+            else:
+                print("🔕 SSL alerts are muted.")
         else:
             print("All certificates are fine, no alerts.")
 
@@ -558,5 +586,101 @@ def main():
     save_json(STATE_FILE, state)
 
 
+def process_telegram_text_commands():
+    url = f"https://api.telegram.org/bot{CONFIG['telegram_bot_token']}/getUpdates"
+    state = load_json(STATE_FILE)
+    last_update_id = state.get("_last_update_id")
+    params = {"timeout": 1}
+    if last_update_id:
+        params["offset"] = last_update_id + 1
+    try:
+        resp = requests.get(url, params=params, timeout=5).json()
+    except Exception as e:
+        print(f"[Polling] Exception: {e}")
+        return
+    send_keyboard = False
+    for update in resp.get("result", []):
+        state["_last_update_id"] = update["update_id"]
+        if "message" in update and "text" in update["message"]:
+            text = update["message"]["text"].strip()
+            if text == "🔕 Mute Capacity":
+                state["mute_capacity_alert"] = True
+                send_keyboard = True
+            elif text == "🔔 Unmute Capacity":
+                state["mute_capacity_alert"] = False
+                send_keyboard = True
+            elif text == "🔕 Mute Failover":
+                state["mute_failover_alert"] = True
+                send_keyboard = True
+            elif text == "🔔 Unmute Failover":
+                state["mute_failover_alert"] = False
+                send_keyboard = True
+            elif text == "🔕 Mute Backup Failover":
+                state["mute_backup_failover_alert"] = True
+                send_keyboard = True
+            elif text == "🔔 Unmute Backup Failover":
+                state["mute_backup_failover_alert"] = False
+                send_keyboard = True
+            elif text == "🔕 Mute SSL":
+                state["mute_ssl_alert"] = True
+                send_keyboard = True
+            elif text == "🔔 Unmute SSL":
+                state["mute_ssl_alert"] = False
+                send_keyboard = True
+    save_json(STATE_FILE, state)
+    
+    if send_keyboard:
+        reply_keyboard = build_dynamic_keyboard(state)
+        send_telegram_message(
+            CONFIG["telegram_bot_token"],
+            CONFIG["telegram_chat_id"],
+            "✅ وضعیت هشدار به‌روزرسانی شد",
+            reply_markup=json.dumps(reply_keyboard)
+        )
+
+# Show reply keyboard to user
+reply_keyboard = {
+    "keyboard": [
+        ["🔕 Mute Capacity", "🔕 Mute Failover"],
+        ["🔕 Mute Backup Failover", "🔕 Mute SSL"],
+        ["🔔 Unmute Capacity", "🔔 Unmute Failover"],
+        ["🔔 Unmute Backup Failover", "🔔 Unmute SSL"]
+    ],
+    "resize_keyboard": True,
+    "one_time_keyboard": False
+}
+
+def build_dynamic_keyboard(state):
+    mute_row = []
+    unmute_row = []
+    if not state.get("mute_failover_alert", False):
+        mute_row.append("🔕 Mute Failover")
+    else:
+        unmute_row.append("🔔 Unmute Failover")
+    if not state.get("mute_backup_failover_alert", False):
+        mute_row.append("🔕 Mute Backup Failover")
+    else:
+        unmute_row.append("🔔 Unmute Backup Failover")
+    if not state.get("mute_ssl_alert", False):
+        mute_row.append("🔕 Mute SSL")
+    else:
+        unmute_row.append("🔔 Unmute SSL")
+    if not state.get("mute_capacity_alert", False):
+        mute_row.append("🔕 Mute Capacity")
+    else:
+        unmute_row.append("🔔 Unmute Capacity")
+    keyboard = []
+    if mute_row:
+        keyboard.append(mute_row)
+    if unmute_row:
+        keyboard.append(unmute_row)
+    return {
+        "keyboard": keyboard,
+        "resize_keyboard": True,
+        "one_time_keyboard": False
+    }
+# Use build_dynamic_keyboard(state) for reply_markup in all alert send_telegram_message calls.
+
 if __name__ == "__main__":
+    process_telegram_text_commands()
     main()
