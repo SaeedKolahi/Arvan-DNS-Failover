@@ -5,6 +5,7 @@ __pycache__/
 
 # State file containing sensitive data
 state.json
+config.json
 
 # Environment variables
 .env
@@ -20,4 +21,3 @@ venv/
 # Log files
 *.log
 
-config.json

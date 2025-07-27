@@ -14,6 +14,7 @@ import platform
 import subprocess
 import stat
 import shutil
+import time
 from client_counter import get_client_count
 import pytz
 
@@ -318,6 +319,36 @@ def should_check_cert(state):
     except:
         return True  # if timestamp was malformed
 
+def restart_xui_service(host, username="root", password=None, key_filename=None):
+    """Restart x-ui service on the specified host via SSH."""
+    try:
+        ssh = paramiko.SSHClient()
+        ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        
+        if key_filename:
+            ssh.connect(host, username=username, key_filename=key_filename, timeout=10)
+        else:
+            ssh.connect(host, username=username, password=password, timeout=10)
+        
+        restart_commands = "x-ui restart"
+        
+        try:
+            stdin, stdout, stderr = ssh.exec_command(restart_commands, timeout=30)
+            exit_status = stdout.channel.recv_exit_status()
+            if exit_status == 0:
+                print(f"    -> ✅ Successfully restarted x-ui service on {host} using: {restart_commands}")
+                ssh.close()
+                return True
+        except Exception as e:
+            print(f"    -> ⚠️ Command '{restart_commands}' failed on {host}: {e}")
+        
+        ssh.close()
+        return False
+        
+    except Exception as e:
+        print(f"    -> ❌ SSH connection failed to {host}: {e}")
+        return False
+
 def check_cert_expiry_main_server(host):
     ssh = paramiko.SSHClient()
     ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
@@ -358,7 +389,7 @@ def check_cert_expiry_main_server(host):
 def main():
     state = load_json(STATE_FILE)
     # Initialize mute keys for each alert type if missing
-    for mute_key in ["mute_capacity_alert", "mute_failover_alert", "mute_ssl_alert", "mute_backup_failover_alert"]:
+    for mute_key in ["mute_capacity_alert", "mute_failover_alert", "mute_ssl_alert", "mute_backup_failover_alert", "mute_panel_alert"]:
         if mute_key not in state:
             state[mute_key] = False
     domain = CONFIG["domain"]
@@ -377,20 +408,6 @@ def main():
 
         print(f"[*] Probing {fqdn} (ping each IP once with {CONFIG['timeout_seconds']}s timeout)...")
         
-        # Count clients on the current main server
-
-        client_count = get_client_count(fqdn, CONFIG["panel_port"], CONFIG["base_path"], CONFIG["panel_user"], CONFIG["panel_pass"])
-        if client_count is not None:
-            available = max(0, CONFIG["max_capacity"] - client_count)
-            total_available += available
-            capacity_details.append(f"{subdomain}: {client_count} / {CONFIG['max_capacity']} (available: {available})")
-            print(f"    -> 📊 Client Count: {client_count} (available: {available})")
-        else:
-            capacity_details.append(f"{subdomain}: Failed to get count")
-            print(f"    -> ⚠️  Could not retrieve client count for {fqdn}.")
-
-        
-
         try:
             main_ip = socket.gethostbyname(fqdn)
         except:
@@ -508,6 +525,57 @@ def main():
                     print("[API] Failed to switch to backup IPs.")
             else:
                 print(f"[+] {fqdn} is reachable.")
+                
+                # Count clients on the current main server (only when IPs are reachable)
+                client_count = get_client_count(fqdn, CONFIG["panel_port"], CONFIG["base_path"], CONFIG["panel_user"], CONFIG["panel_pass"])
+                
+                # If first attempt fails, try restarting x-ui and retry
+                if client_count is None:
+                    print(f"    -> 🔄 First attempt failed, trying to restart x-ui service on {fqdn}...")
+                    if restart_xui_service(main_ip, CONFIG["ssh_user"], CONFIG["ssh_pass"]):
+                        print(f"    -> ⏳ Waiting 3 seconds for x-ui to fully restart...")
+                        time.sleep(3)  
+                        
+                        # Try counting clients again
+                        client_count = get_client_count(fqdn, CONFIG["panel_port"], CONFIG["base_path"], CONFIG["panel_user"], CONFIG["panel_pass"])
+                        if client_count is not None:
+                            print(f"    -> ✅ Client count successful after restart!")
+                        else:
+                            print(f"    -> ❌ Client count still failed after restart")
+                            # Send Telegram alert about persistent client count failure
+                            domain_md = inline_code(fqdn)
+                            msg = (
+                                "🚨 *Client Count Service Issue*\n"
+                                f"Domain: {domain_md}\n"
+                                "Status: Client count failed even after panel restart\n"
+                            )
+                            if not state.get("mute_panel_alert", False):
+                                send_telegram_message(CONFIG["telegram_bot_token"], CONFIG["telegram_chat_id"], msg, reply_markup=json.dumps(build_dynamic_keyboard(state)))
+                            else:
+                                print("🔕 Panel alerts are muted.")
+                    else:
+                        print(f"    -> ❌ Failed to restart x-ui service")
+                        # Send Telegram alert about restart failure
+                        domain_md = inline_code(fqdn)
+                        msg = (
+                            "🚨 *X-UI Restart Failed*\n"
+                            f"Domain: {domain_md}\n"
+                            "Status: Could not restart panel service"
+                        )
+                        if not state.get("mute_panel_alert", False):
+                            send_telegram_message(CONFIG["telegram_bot_token"], CONFIG["telegram_chat_id"], msg, reply_markup=json.dumps(build_dynamic_keyboard(state)))
+                        else:
+                            print("🔕 Panel alerts are muted.")
+                
+                if client_count is not None:
+                    available = max(0, CONFIG["max_capacity"] - client_count)
+                    total_available += available
+                    capacity_details.append(f"{subdomain}: {client_count} / {CONFIG['max_capacity']} (available: {available})")
+                    print(f"    -> 📊 Client Count: {client_count} (available: {available})")
+                else:
+                    capacity_details.append(f"{subdomain}: Failed to get count")
+                    print(f"    -> ⚠️  Could not retrieve client count for {fqdn}.")
+                
                 if ping_host(backup_ip):
                     transfer_and_patch_db(from_host=main_ip, to_host=backup_ip, balancer_tag="lb-direct")
                     sync_cert_folder(from_host=main_ip, to_host=backup_ip)
@@ -627,6 +695,12 @@ def process_telegram_text_commands():
             elif text == "🔔 Unmute SSL":
                 state["mute_ssl_alert"] = False
                 send_keyboard = True
+            elif text == "🔕 Mute Panel":
+                state["mute_panel_alert"] = True
+                send_keyboard = True
+            elif text == "🔔 Unmute Panel":
+                state["mute_panel_alert"] = False
+                send_keyboard = True
     save_json(STATE_FILE, state)
     
     if send_keyboard:
@@ -643,8 +717,10 @@ reply_keyboard = {
     "keyboard": [
         ["🔕 Mute Capacity", "🔕 Mute Failover"],
         ["🔕 Mute Backup Failover", "🔕 Mute SSL"],
+        ["🔕 Mute Panel"],
         ["🔔 Unmute Capacity", "🔔 Unmute Failover"],
-        ["🔔 Unmute Backup Failover", "🔔 Unmute SSL"]
+        ["🔔 Unmute Backup Failover", "🔔 Unmute SSL"],
+        ["🔔 Unmute Panel"]
     ],
     "resize_keyboard": True,
     "one_time_keyboard": False
@@ -669,6 +745,10 @@ def build_dynamic_keyboard(state):
         mute_row.append("🔕 Mute Capacity")
     else:
         unmute_row.append("🔔 Unmute Capacity")
+    if not state.get("mute_panel_alert", False):
+        mute_row.append("🔕 Mute Panel")
+    else:
+        unmute_row.append("🔔 Unmute Panel")
     keyboard = []
     if mute_row:
         keyboard.append(mute_row)
