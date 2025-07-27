@@ -8,10 +8,13 @@ A Python script for automatic DNS failover management using ArvanCloud API. This
 
 - Continuous server monitoring using ping
 - Automatic failover to backup server when main server is down
-- Telegram notifications
+- Telegram notifications with mute/unmute controls
 - xray configuration sync between servers
 - SSL certificate expiry monitoring
 - Certificate folder sync between servers
+- Client count monitoring with automatic retry logic
+- Panel service restart functionality
+- Separate alert types for different issues (capacity, failover, SSL, panel)
 
 ## Prerequisites
 
@@ -55,3 +58,12 @@ State information is stored in `state.json`, which includes:
 - Current status of each domain (backup or normal mode)
 - Original IPs for restoration
 - Last certificate check timestamp
+- Mute settings for different alert types (capacity, failover, SSL, panel)
+
+## Alert Types
+
+The system supports different types of alerts with individual mute controls:
+- **Capacity Alerts**: When client count exceeds thresholds
+- **Failover Alerts**: When DNS failover is activated/restored
+- **SSL Alerts**: When SSL certificates are expiring soon
+- **Panel Alerts**: When x-ui panel service has issues
